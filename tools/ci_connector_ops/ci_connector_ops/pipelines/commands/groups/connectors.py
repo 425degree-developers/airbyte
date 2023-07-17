@@ -96,10 +96,15 @@ def connectors(
 
     all_connectors = get_all_released_connectors()
 
+    # We get the modified connectors and downstream connector deps, and files
     modified_connectors_and_files = get_modified_connectors(ctx.obj["modified_files"])
+
     # We select all connectors by default
+    # and attach modified files to them
     selected_connectors_and_files = {connector: modified_connectors_and_files.get(connector, []) for connector in all_connectors}
 
+    if modified:
+        selected_connectors_and_files = modified_connectors_and_files
     if names:
         selected_connectors_and_files = {
             connector: selected_connectors_and_files[connector]
@@ -117,10 +122,6 @@ def connectors(
             connector: selected_connectors_and_files[connector]
             for connector in selected_connectors_and_files
             if connector.release_stage in release_stages
-        }
-    if modified:
-        selected_connectors_and_files = {
-            connector: modified_files for connector, modified_files in selected_connectors_and_files.items() if modified_files
         }
 
     ctx.obj["selected_connectors_and_files"] = selected_connectors_and_files
@@ -161,6 +162,7 @@ def test(
             report_output_prefix=ctx.obj["report_output_prefix"],
             use_remote_secrets=ctx.obj["use_remote_secrets"],
             gha_workflow_run_url=ctx.obj.get("gha_workflow_run_url"),
+            dagger_logs_url=ctx.obj.get("dagger_logs_url"),
             pipeline_start_timestamp=ctx.obj.get("pipeline_start_timestamp"),
             ci_context=ctx.obj.get("ci_context"),
             pull_request=ctx.obj.get("pull_request"),
@@ -209,6 +211,7 @@ def build(ctx: click.Context) -> bool:
             report_output_prefix=ctx.obj["report_output_prefix"],
             use_remote_secrets=ctx.obj["use_remote_secrets"],
             gha_workflow_run_url=ctx.obj.get("gha_workflow_run_url"),
+            dagger_logs_url=ctx.obj.get("dagger_logs_url"),
             pipeline_start_timestamp=ctx.obj.get("pipeline_start_timestamp"),
             ci_context=ctx.obj.get("ci_context"),
             ci_gcs_credentials=ctx.obj["ci_gcs_credentials"],
@@ -309,12 +312,9 @@ def publish(
             "Publishing from a local environment is not recommend and requires to be logged in Airbyte's DockerHub registry, do you want to continue?",
             abort=True,
         )
-    if ctx.obj["modified"]:
-        selected_connectors_and_files = get_modified_connectors(get_modified_metadata_files(ctx.obj["modified_files"]))
-        selected_connectors_names = [connector.technical_name for connector in selected_connectors_and_files.keys()]
-    else:
-        selected_connectors_and_files = ctx.obj["selected_connectors_and_files"]
-        selected_connectors_names = ctx.obj["selected_connectors_names"]
+
+    selected_connectors_and_files = ctx.obj["selected_connectors_and_files"]
+    selected_connectors_names = ctx.obj["selected_connectors_names"]
 
     main_logger.info(f"Will publish the following connectors: {', '.join(selected_connectors_names)}")
     publish_connector_contexts = reorder_contexts(
@@ -337,6 +337,7 @@ def publish(
                 git_branch=ctx.obj["git_branch"],
                 git_revision=ctx.obj["git_revision"],
                 gha_workflow_run_url=ctx.obj.get("gha_workflow_run_url"),
+                dagger_logs_url=ctx.obj.get("dagger_logs_url"),
                 pipeline_start_timestamp=ctx.obj.get("pipeline_start_timestamp"),
                 ci_context=ctx.obj.get("ci_context"),
                 ci_gcs_credentials=ctx.obj["ci_gcs_credentials"],
@@ -434,6 +435,7 @@ def format(ctx: click.Context) -> bool:
             report_output_prefix=ctx.obj["report_output_prefix"],
             use_remote_secrets=ctx.obj["use_remote_secrets"],
             gha_workflow_run_url=ctx.obj.get("gha_workflow_run_url"),
+            dagger_logs_url=ctx.obj.get("dagger_logs_url"),
             pipeline_start_timestamp=ctx.obj.get("pipeline_start_timestamp"),
             ci_context=ctx.obj.get("ci_context"),
             ci_gcs_credentials=ctx.obj["ci_gcs_credentials"],
