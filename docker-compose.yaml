@@ -243,6 +243,7 @@ services:
     networks:
       - airbyte_internal
       - airbyte_public
+      - cloudflare
     depends_on:
       - webapp
       - server
@@ -259,3 +260,6 @@ volumes:
 networks:
   airbyte_public:
   airbyte_internal:
+  cloudflare:
+    name: ${CLOUDFLARE_NETWORK:-portainer_x_cloudflare_default}
+    external: true
