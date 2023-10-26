@@ -6,101 +6,14 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
+from logging import Logger
 from typing import TYPE_CHECKING, Callable, List
 
 import requests
-import yaml
-from connector_ops.utils import ConnectorLanguage
-from dagger import DaggerError
 
 if TYPE_CHECKING:
-    from dagger import Client, Container, Directory
-    from pipelines.contexts import ConnectorContext
-
-
-LINES_TO_REMOVE_FROM_GRADLE_FILE = [
-    # Do not build normalization with Gradle - we build normalization with Dagger in the BuildOrPullNormalization step.
-    "project(':airbyte-integrations:bases:base-normalization').airbyteDocker.output",
-]
-
-
-async def _patch_gradle_file(context: ConnectorContext, connector_dir: Directory) -> Directory:
-    """Patch the build.gradle file of the connector under test by removing the lines declared in LINES_TO_REMOVE_FROM_GRADLE_FILE.
-
-    Underlying issue:
-        Java connectors build.gradle declare a dependency to the normalization module.
-        It means every time we test a java connector the normalization is built.
-        This is time consuming and not required as normalization is now baked in containers.
-        Normalization is going away soon so hopefully this hack will be removed soon.
-
-    Args:
-        context (ConnectorContext): The initialized connector context.
-        connector_dir (Directory): The directory containing the build.gradle file to patch.
-    Returns:
-        Directory: The directory containing the patched gradle file.
-    """
-    if context.connector.language is not ConnectorLanguage.JAVA:
-        context.logger.info(f"Connector language {context.connector.language} does not require a patched build.gradle file.")
-        return connector_dir
-
-    try:
-        gradle_file_content = await connector_dir.file("build.gradle").contents()
-    except DaggerError:
-        context.logger.info("Could not find build.gradle file in the connector directory. Skipping patching.")
-        return connector_dir
-
-    context.logger.warn("Patching build.gradle file to remove normalization build.")
-
-    patched_gradle_file = []
-
-    for line in gradle_file_content.splitlines():
-        if not any(line_to_remove in line for line_to_remove in LINES_TO_REMOVE_FROM_GRADLE_FILE):
-            patched_gradle_file.append(line)
-    return connector_dir.with_new_file("build.gradle", "\n".join(patched_gradle_file))
-
-
-def _patch_cat_config(context: ConnectorContext, connector_dir: Directory) -> Directory:
-    """
-    Patch the acceptance-test-config.yml file of the connector under test to use the connector image with git revision tag and not dev.
-
-
-    Underlying issue:
-        acceptance-test-config.yml targets the connector image with the dev tag by default
-        in order to make sure the correct connector image is used when running the acceptance tests we tag the connector under test image with the git revision.
-        we patch the acceptance-test-config.yml file to use the connector image with the git revision tag.
-
-    Hack:
-        This function is called by patch_connector_dir, which is called every time the connector source directory is read by the pipeline.
-
-    Args:
-        context (ConnectorContext): The initialized connector context.
-        connector_dir (Directory): The directory containing the acceptance-test-config.yml file to patch.
-    """
-    if not context.connector.acceptance_test_config:
-        return connector_dir
-
-    context.logger.info("Patching acceptance-test-config.yml to use connector image with git revision tag and not dev.")
-
-    patched_cat_config = deepcopy(context.connector.acceptance_test_config)
-    patched_cat_config["connector_image"] = context.connector.acceptance_test_config["connector_image"].replace(
-        ":dev", f":{context.git_revision}"
-    )
-    return connector_dir.with_new_file("acceptance-test-config.yml", yaml.safe_dump(patched_cat_config))
-
-
-async def patch_connector_dir(context: ConnectorContext, connector_dir: Directory) -> Directory:
-    """Patch a connector directory: patch cat config, gradle file and dockerfile.
-
-    Args:
-        context (ConnectorContext): The initialized connector context.
-        connector_dir (Directory): The directory containing the connector to patch.
-    Returns:
-        Directory: The directory containing the patched connector.
-    """
-    patched_connector_dir = await _patch_gradle_file(context, connector_dir)
-    patched_connector_dir = _patch_cat_config(context, patched_connector_dir)
-    return patched_connector_dir.with_timestamps(1)
+    from dagger import Client, Container
+    from pipelines.airbyte_ci.connectors.context import ConnectorContext
 
 
 async def cache_latest_cdk(dagger_client: Client, pip_cache_volume_name: str = "pip_cache") -> None:
@@ -137,7 +50,7 @@ async def cache_latest_cdk(dagger_client: Client, pip_cache_volume_name: str = "
         dagger_client.container()
         .from_("python:3.9-slim")
         .with_mounted_cache("/root/.cache/pip", dagger_client.cache_volume(pip_cache_volume_name))
-        .with_exec(["pip", "install", "--force-reinstall", f"airbyte-cdk=={cdk_latest_version}"])
+        .with_exec(["pip", "install", "--force-reinstall", f"airbyte-cdk=={cdk_latest_version}", "-vvv"])
         .sync()
     )
 
@@ -162,6 +75,36 @@ def never_fail_exec(command: List[str]) -> Callable:
     """
 
     def never_fail_exec_inner(container: Container):
-        return container.with_exec(["sh", "-c", f"{' '.join(command)}; echo $? > /exit_code"])
+        return container.with_exec(["sh", "-c", f"{' '.join(command)}; echo $? > /exit_code"], skip_entrypoint=True)
 
     return never_fail_exec_inner
+
+
+# We want to invalidate the persisted dagger cache and gradle cache for source-postgres.
+# We do it in the context of a project to boost the CI speed for this connector.
+# Invalidating the cache on every run will help us gather unbiased metrics on the CI speed.
+# This should be removed once the project is over.
+CONNECTORS_WITHOUT_CACHING = [
+    "source-postgres",
+]
+
+
+def get_cachebuster(context: ConnectorContext, logger: Logger) -> str:
+    """
+    This function will return a semi-static cachebuster value for connectors in CONNECTORS_WITHOUT_CACHING and a static value for all other connectors.
+    By semi-static I mean that the value (the pipeline start time) will change on each pipeline execution but will be the same for all the steps of the pipeline.
+    It ensures we do not use the remotely persisted dagger cache but we still benefit from the buildkit layer caching inside the pipeline execution.
+    This hack is useful to collect unbiased metrics on the CI speed for connectors in CONNECTORS_WITHOUT_CACHING.
+
+    When the cachebuster value is static it won't invalidate the dagger cache because it's the same value as the previous run: no layer will be rebuilt.
+    When the cachebuster value is changed it will invalidate the dagger cache because it's a different value than the previous run: all downstream layers will be rebuilt.
+
+    Returns:
+        str: The cachebuster value.
+    """
+    if context.connector.technical_name in CONNECTORS_WITHOUT_CACHING:
+        logger.warning(
+            f"Invalidating the persisted dagger cache for {context.connector.technical_name}. Only used in the context of the CI performance improvements project for {context.connector.technical_name}."
+        )
+        return str(context.pipeline_start_timestamp)
+    return "0"

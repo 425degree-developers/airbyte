@@ -7,7 +7,7 @@ import logging
 import os
 import urllib
 from abc import ABC, abstractmethod
-from contextlib import suppress
+from pathlib import Path
 from typing import Any, Callable, Iterable, List, Mapping, MutableMapping, Optional, Tuple, Union
 from urllib.parse import urljoin
 
@@ -17,9 +17,10 @@ from airbyte_cdk.models import SyncMode
 from airbyte_cdk.sources.streams.availability_strategy import AvailabilityStrategy
 from airbyte_cdk.sources.streams.core import Stream, StreamData
 from airbyte_cdk.sources.streams.http.availability_strategy import HttpAvailabilityStrategy
+from airbyte_cdk.sources.utils.types import JsonType
+from airbyte_cdk.utils.constants import ENV_REQUEST_CACHE_PATH
 from requests.auth import AuthBase
 
-from ...utils.types import JsonType
 from .auth.core import HttpAuthenticator, NoAuth
 from .exceptions import DefaultBackoffException, RequestBodyException, UserDefinedBackoffException
 from .rate_limiting import default_backoff_handler, user_defined_backoff_handler
@@ -64,18 +65,15 @@ class HttpStream(Stream, ABC):
         return False
 
     def request_cache(self) -> requests.Session:
-        self.clear_cache()
-        return requests_cache.CachedSession(self.cache_filename)
+        cache_dir = Path(os.getenv(ENV_REQUEST_CACHE_PATH))
+        return requests_cache.CachedSession(str(cache_dir / self.cache_filename), backend="sqlite")
 
     def clear_cache(self) -> None:
         """
-        remove cache file only once
+        clear cached requests for current session, can be called any time
         """
-        STREAM_CACHE_FILES = globals().setdefault("STREAM_CACHE_FILES", set())
-        if self.cache_filename not in STREAM_CACHE_FILES:
-            with suppress(FileNotFoundError):
-                os.remove(self.cache_filename)
-            STREAM_CACHE_FILES.add(self.cache_filename)
+        if isinstance(self._session, requests_cache.CachedSession):
+            self._session.cache.clear()
 
     @property
     @abstractmethod
@@ -104,6 +102,13 @@ class HttpStream(Stream, ABC):
         Override if needed. Specifies maximum amount of retries for backoff policy. Return None for no limit.
         """
         return 5
+
+    @property
+    def max_time(self) -> Union[int, None]:
+        """
+        Override if needed. Specifies maximum total waiting time (in seconds) for backoff policy. Return None for no limit.
+        """
+        return 60 * 10
 
     @property
     def retry_factor(self) -> float:
@@ -382,11 +387,19 @@ class HttpStream(Stream, ABC):
         Add this condition to avoid an endless loop if it hasn't been set
         explicitly (i.e. max_retries is not None).
         """
+        max_time = self.max_time
+        """
+        According to backoff max_time docstring:
+            max_time: The maximum total amount of time to try for before
+                giving up. Once expired, the exception will be allowed to
+                escape. If a callable is passed, it will be
+                evaluated at runtime and its return value used.
+        """
         if max_tries is not None:
             max_tries = max(0, max_tries) + 1
 
-        user_backoff_handler = user_defined_backoff_handler(max_tries=max_tries)(self._send)
-        backoff_handler = default_backoff_handler(max_tries=max_tries, factor=self.retry_factor)
+        user_backoff_handler = user_defined_backoff_handler(max_tries=max_tries, max_time=max_time)(self._send)
+        backoff_handler = default_backoff_handler(max_tries=max_tries, max_time=max_time, factor=self.retry_factor)
         return backoff_handler(user_backoff_handler)(request, request_kwargs)
 
     @classmethod
