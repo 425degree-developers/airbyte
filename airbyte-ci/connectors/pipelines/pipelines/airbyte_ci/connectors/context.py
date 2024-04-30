@@ -19,8 +19,8 @@ from pipelines.airbyte_ci.connectors.reports import ConnectorReport
 from pipelines.consts import BUILD_PLATFORMS
 from pipelines.dagger.actions import secrets
 from pipelines.helpers.connectors.modifed import ConnectorWithModifiedFiles
+from pipelines.helpers.execution.run_steps import RunStepOptions
 from pipelines.helpers.github import update_commit_status_check
-from pipelines.helpers.run_steps import RunStepOptions
 from pipelines.helpers.slack import send_message_to_webhook
 from pipelines.helpers.utils import METADATA_FILE_NAME
 from pipelines.models.contexts.pipeline_context import PipelineContext
@@ -173,6 +173,10 @@ class ConnectorContext(PipelineContext):
     @property
     def connector_acceptance_test_source_dir(self) -> Directory:
         return self.get_repo_dir("airbyte-integrations/bases/connector-acceptance-test")
+
+    @property
+    def live_tests_dir(self) -> Directory:
+        return self.get_repo_dir("airbyte-ci/connectors/live-tests")
 
     @property
     def should_save_updated_secrets(self) -> bool:
